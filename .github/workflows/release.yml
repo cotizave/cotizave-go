@@ -1,0 +1,65 @@
+name: Release
+
+# Tag-triggered release. To publish version X.Y.Z:
+#   1. set Version = "X.Y.Z" in doc.go (commit it) and update CHANGELOG.md,
+#   2. git tag vX.Y.Z && git push origin vX.Y.Z
+#
+# A Go module needs no registry push: pkg.go.dev indexes it on the first
+# `go get github.com/cotizave/cotizave-go@vX.Y.Z`. This workflow runs the full
+# gate for the tagged commit and creates a GitHub Release. The tag must match
+# the Version constant or the gate fails.
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: write # create the GitHub Release
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Tag matches the Version constant
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(grep -oE 'Version = "[0-9]+\.[0-9]+\.[0-9]+"' doc.go | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Tag v$tag does not match Version ($pkg) in doc.go"
+            exit 1
+          fi
+          echo "Releasing $pkg"
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          [ -z "$unformatted" ] || { echo "::error::not gofmt-ed:"; echo "$unformatted"; exit 1; }
+
+      - run: go vet ./...
+      - run: go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - run: go test -race ./...
+
+  release:
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
+          fi
